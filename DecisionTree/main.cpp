@@ -51,13 +51,13 @@ namespace ml {
 	//  用vector存储数据集
     typedef vector<data> dataset_t;
 
-    //  分类器接收一条数据，并
+    //  分类器接收一条数据，并返回一个整数
     typedef function<int(const data& d)> classifier;
 
 	class decision_tree {
 	public:
 
-        //  放在节点上的分类Functor
+        //  放在节点上的分类器，一条数据的第i个属性值是否小于v
         struct attr_clf {
             float v; int i;
             int operator()(const data& d) const {
@@ -72,6 +72,7 @@ namespace ml {
             }
         };
 
+        //  决策树节点，若is_leaf为真则res代表当前节点的分类结果
 		struct node {
 			node() : is_leaf(false) { c[0] = c[1] = 0; }
 			node* c[2];
@@ -80,11 +81,11 @@ namespace ml {
 			bool is_leaf;
 		};
 
+		int attr_cnt;	    //	属性总数
+		classifier clf0;	//  主分类器，用于提取标签
+		node* root;         //  决策树根节点
 
-		int attr_cnt;	//	attribute count
-		classifier clf0;	//	main classifier
-		node* root;
-
+		//  销毁以p为根的子树
 		void destroy(node*& p) {
 			if (!p) return;
 			else if (!p->is_leaf) {
@@ -95,6 +96,7 @@ namespace ml {
 			p = 0;
 		}
 
+		//  统计代器区间[first,last)中的数据类型，将结果存入c中
 		template<class BidIt>
 		void count(int* c, BidIt first, BidIt last) {
             fill(c, c + 10, 0);
@@ -102,23 +104,27 @@ namespace ml {
 				c[clf0(*it)]++;
 		}
 
+        //  统计信息熵，s为总数
         double cal_ent(int* c, int s) {
             double res = 0;
             for (int i = 0; i != 10; ++i) {
-                if (!c[i]) continue;
+                if (!c[i]) continue;    //  不存在第i类样本，跳过
                 double p = (double)c[i] / s;
                 res -= p * log(p);
             }
             return res;
         }
 
+        //  统计信息增益
         double cal_gain(int* c, int* lc, int* rc) {
             int s = 0, ls = 0, rs = 0;
+            //  统计被分类至左子树，右子树中的数据条数
             for (int i = 0; i != 10; ++i) {
                 s += c[i];
                 ls += lc[i];
                 rs += rc[i];
             }
+            //  计算信息增益
             double e = cal_ent(c, s),
                    e1 = cal_ent(lc, ls),
                    e0 = cal_ent(rc, rs);
@@ -127,6 +133,7 @@ namespace ml {
             return e - (ls * e1 + rs * e0) / (ls + rs);
         }
 
+        //  老版本的信息增益计算，复杂度过大
 //		template<class BidIt>
 //		double cal_gain(const classifier& f, BidIt first, BidIt last) {
 //			auto it = partition(first, last, f);
@@ -139,39 +146,54 @@ namespace ml {
 //			return e - (D1 * e1 + D0 * e0) / (D1 + D0);
 //		}
 
+        //  选取标签众数作为分类结果
 		static inline int cal_res(int* c) {
 		    return max_element(c, c + 10) - c; //c[0] <= c[1] ? 1 : 0;
         }
 
+        //  计算选取众数为分类结果时的分类精准度
 		static inline double cal_acc(int* c) {
 		    int p = cal_res(c);
             if (c[p] == 0) return 1.0;
             else return (double)(c[p]) / accumulate(c, c + 10, 0);
 		}
 
+		//  判断是否仅剩下一类样本
 		static inline bool single_class(int* c) {
             return *max_element(c, c + 10) == accumulate(c, c + 10, 0);
         }
 
+        //  在迭代器区间[first,last)中寻找信息增益最大的分类器，将结果存入res
+        //  老版本在统计每个分割点时都需要遍历整个迭代器区间，在MNIST数据集上运行速度极慢
+        //  老版本时间复杂度为O(attr_cnt * dist(first,last) ^ 2)
+        //  新版本在统计每个分割点的信息时能O(1)转移到下个分割点，性能比老版本有极大的提升
+        //  新版本时间复杂度为O(attr_cnt * dist(first,last) * log(dist(first,last)))
 		template<class BidIt>
 		bool max_gain_classifier(classifier& res, BidIt first, BidIt last) {
-			double max_gain = 0;
-			bool flag = 0;	//	set to true when we have a candidate(classifier)
-			int c[10]; count(c, first, last);
+			double max_gain = 0;    //  最大增益
+			bool flag = 0;	        //	标记为真时说明存在至少一个候选分类器
+			int c[10]; count(c, first, last);   //  统计区间内数据标签个数
+			//  依次考虑所有属性
 			for (int i = 0; i != attr_cnt; ++i) {
+                //  因为是连续型属性，所以按第i个属性值大小进行排序
                 sort(first, last, [i](const ml::data& d1, const ml::data& d2) {
                      return d1.first[i] < d2.first[i];
                 });
 
+                //  初始状态为左子树为空，全部分类至右子树。
                 int lc[10] = {0}, rc[10] = {0}; copy_n(c, 10, rc);
                 for (auto it = first; it != prev(last); ++it) {
+                    //  *it与*next(it)在第i个属性上的值相等，无法分割
                     if (it->first[i] == next(it)->first[i]) continue;
+                    //  选取分割点为*it与*next(it)在第i个属性上的值的平均值
                     float v = (it->first[i] + (next(it)->first[i])) / 2;
+                    //  构造分类器
                     classifier f = attr_clf({ v, i });
+                    //  *it被从右子树移出并加入左子树
                     lc[clf0(*it)]++;
                     rc[clf0(*it)]--;
+                    //  计算当前信息增益
                     double gain = cal_gain(c, lc, rc);
-
                     if (gain > max_gain) {
                         max_gain = gain;
                         res = f;
@@ -179,6 +201,7 @@ namespace ml {
                     }
                 }
 
+                //  老版本的信息增益计算，复杂度过大
 //				for (int j = 0; j != (int)s.size() - 1; ++j) {
 //					float v = (s[j] + s[j + 1]) / 2.;
 //					classifier f = attr_clf{ v, i };
@@ -193,16 +216,19 @@ namespace ml {
 			return flag;
 		}
 
+		//  对p建立新节点，并对迭代器区间[first,last)中的元素进行划分
 		template<class BidIt>
 		void build(node*& p, BidIt first, BidIt last) {
 		    #if BUILD_INFO
 		    cout << "Build! " << distance(first, last) << endl;
 		    #endif
 			if (first == last) throw runtime_error("Empty range!");
+            //  统计数据标签个数
 			int c[10]; count(c, first, last);
 			p = new node();
 			classifier f;
 			if (single_class(c)) {
+                //  标签仅剩一种，设为叶节点并结束
                 #if BUILD_INFO
                 cout << "Single class!" << endl;
                 #endif
@@ -210,6 +236,7 @@ namespace ml {
 				p->is_leaf = true;
 			}
 			else if (!max_gain_classifier(f, first, last)) {
+			    //  无法选取分类器，设为叶节点并将标签众数设为分类结果
                 #if BUILD_INFO
                 cout << "Classifier selection failed!" << endl;
                 #endif
@@ -217,6 +244,7 @@ namespace ml {
 				p->is_leaf = true;
 			}
 			else {
+			    //  成功选取分类器，划分后递归建树
 				p->f = f;
 				auto it = partition(first, last, f);
 				build(p->c[1], first, it);
@@ -350,6 +378,7 @@ namespace ml {
 
 		~decision_tree() { destroy(root); root = 0; }
 
+		//  统计树高
 		int height(node* p) const {
 			if (p->is_leaf) return 1;
 			else return max(height(p->c[0]), height(p->c[1])) + 1;
@@ -359,9 +388,11 @@ namespace ml {
 			return height(root);
 		}
 
+        //  对数据进行预测
 		int predict(const data& d) const {
 			node* p = root;
 			if (!p) throw std::runtime_error("Decision tree not built!");
+			//  按每个节点的分类结果行进至叶节点
 			while (!p->is_leaf)
 				p = p->c[p->f(d)];
 			return p->res;
@@ -369,6 +400,7 @@ namespace ml {
 
 	};
 
+	//  主成分分析部分
     using Eigen::Matrix;
 	using Eigen::Dynamic;
     using Eigen::EigenSolver;
@@ -377,48 +409,59 @@ namespace ml {
 
     class PCA {
     public:
+        //  W为投影矩阵
         Mat W, Wt;
+        //  xc为训练集中心
         Vec xc;
+        //  k为降维的目标维数
         int k;
 
+        //  用训练集计算投影矩阵
         void build(const dataset_t& trainset, int k_) {
-            //  Reduce dimension m to k
             int m = trainset[0].first.size();
             int n = trainset.size();
             k = k_;
+
+            //  将数据导入矩阵
             Mat X(m, n);
             for (int i = 0; i != n; ++i)
                 for (int j = 0; j != m; ++j)
                     X(j, i) = trainset[i].first[j];
 
+            //  中心化
             xc = X * (Vec::Ones(n) / n);
             for (int i = 0; i != n; ++i)
                 for (int j = 0; j != m; ++j)
                     X(j, i) -= xc(j);
 
+            //  计算X*X^T
             Mat tmp = X * X.transpose();
             #if BUILD_INFO
             cout << "Computing Eigenvectors: ";
             #endif
+
+            //  计算特征值与特征向量
             EigenSolver<Mat> ES(tmp, true);
+            auto eigenvalues = ES.eigenvalues();
+            auto eigenvectors = ES.eigenvectors();
+
             #if BUILD_INFO
             cout << "Complete!" << endl;
             #endif
 
-            auto eigenvalues = ES.eigenvalues();
-            auto eigenvectors = ES.eigenvectors();
             //for (int i = 0; i != m; ++i) cout << eigenvalues(i) << ' ';
             //cout << string(60, '$') << endl;
 
+            //  用优先队列统计特征值最大的k个特征向量，特征值小的先出队
             priority_queue<int, vector<int>, function<bool(int, int)>>
             pq([&eigenvalues](int i1, int i2) { return eigenvalues(i1).real() > eigenvalues(i2).real(); });
-
             for (int i = 0; i != m; ++i) {
                 pq.push(i);
                 if (pq.size() > k) pq.pop();
             }
 
-
+            //  特征向量的顺序无关紧要
+            //  计算投影矩阵W
             W = Mat(m, k);
             for (int i = 0; i != k; ++i) {
                 int t = pq.top(); pq.pop();
@@ -429,14 +472,18 @@ namespace ml {
             Wt = W.transpose();
         }
 
+        //  将高维数据投影至低维
         dataset_t transform(const dataset_t& dataset) {
             int m = dataset[0].first.size(), n = dataset.size();
             dataset_t res(n, data(vector<float>(k, 0), 0));
             for (int i = 0; i != dataset.size(); ++i) {
+                //  将数据导入向量
                 Vec x(m), xv;
                 for (int j = 0; j != m; ++j)
                     x(j) = dataset[i].first[j];
+                //  投影
                 xv = Wt * x;
+                //  将投影后的数据存入结果
                 for (int j = 0; j != k; ++j)
                     res[i].first[j] = xv(j);
                 res[i].second = dataset[i].second;
@@ -446,22 +493,29 @@ namespace ml {
 
     };
 
+    //  分割数据集，分隔点在split_point内
     vector<dataset_t> split_dataset(dataset_t& dataset, vector<double> split_point) {
+        //  将数据集打乱
         mt19937_64 mt(time(0));
         shuffle(dataset.begin(), dataset.end(), mt);
+        //  用vector存储多个数据集
         vector<dataset_t> res;
         int n = dataset.size();
         double p = 0;
         for (int i = 0; i != split_point.size(); ++i) {
+            //  将[l,r)间的数据分入一个数据集
             int l = n * p, r = n * (p + split_point[i]);
             res.push_back(dataset_t(dataset.begin() + l, dataset.begin() + r));
+            //  计算已经分割的比例
             p += split_point[i];
         }
+        //  分入最后一个
         int l = n * p, r = n;
         res.push_back(dataset_t(dataset.begin() + l, dataset.begin() + r));
         return res;
     }
 
+    //  最终的训练模型
     class model {
     public:
         decision_tree tree;
@@ -470,6 +524,7 @@ namespace ml {
 
         model(int k_) : k(k_) {}
 
+        //  flg=0为不剪枝，1为预剪枝，2为后剪枝，1-p为验证集比例（不剪枝时该参数无效）
         void train(dataset_t& trainset, int flg = 0, double p = 0.6) {
             pca.build(trainset, k);
             dataset_t trainset_ = pca.transform(trainset);
@@ -485,6 +540,7 @@ namespace ml {
             }
         }
 
+        //  预测测试集的结果
         vector<int> predict(const dataset_t& testset) {
             dataset_t testset_ = pca.transform(testset);
             vector<int> res;
@@ -493,13 +549,17 @@ namespace ml {
             return res;
         }
 
-        //  returns accuracy on testset
+        //  评估模型的精度，p2为训练集所占比例（若flg不为0则包括验证集）
         double evaluate(dataset_t& dataset, int flg, double p = 0.6, double p2 = 0.8) {
+            //  分割数据集
             vector<dataset_t> datasets = split_dataset(dataset, { p2 });
             dataset_t& trainset = datasets[0];
             dataset_t& testset = datasets[1];
+            //  进行训练
             train(trainset, flg, p);
+            //  预测结果
             vector<int> result = predict(testset);
+            //  统计精准度
             int cnt = 0, tot = testset.size();
             for (int i = 0; i != tot; ++i)
                 if (result[i] == testset[i].second)
@@ -507,6 +567,7 @@ namespace ml {
             return (double)cnt / tot;
         }
 
+        //  获取决策树的树高
         int get_height() {
             return tree.max_height();
         }
@@ -516,6 +577,7 @@ namespace ml {
 
 using namespace std;
 
+//  读入一项
 string read(istream& is) {
 	string res;
 	char ch = is.get();
@@ -527,6 +589,7 @@ string read(istream& is) {
 	return res;
 }
 
+//  读入一条数据，cnt为属性个数，flg为1表示不读入标签
 ml::data parse(istream& is, int cnt, bool flg) {
     ml::data res;
     if (!flg) res.second = stoi(read(is));
@@ -535,6 +598,7 @@ ml::data parse(istream& is, int cnt, bool flg) {
 	return res;
 }
 
+//  从文件流读入有cnt个属性，line条数据的数据集
 vector<ml::data> read_from_file(int cnt, int line, istream& is, bool test = false) {
 	vector<ml::data> v;
 	for (int i = test ? 1 : 0; i != cnt; ++i)
