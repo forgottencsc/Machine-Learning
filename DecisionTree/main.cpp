@@ -45,7 +45,7 @@ namespace ml {
 	using std::cout;
 	using std::endl;
 
-	//  first是熟悉，second是标签
+	//  first是属性，second是标签
 	typedef pair<vector<float>, int> data;
 
 	//  用vector存储数据集
